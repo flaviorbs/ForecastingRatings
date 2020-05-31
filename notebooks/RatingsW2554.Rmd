@@ -81,7 +81,7 @@ sapply(c(LoadedPackages, NonCRANPackages), require, character.only = TRUE)
 ## Load TXT Files to the envoriment and tidy data
 ```{r}
 # Load TXT Files to the envoriment ----
-data <- readr::read_csv("data_raw/15minBrazil/Time BTS_Pred_long_20200523_215519.csv",     col_types = cols(Date = col_date(format = "%Y-%m-%d"), Time = col_character()), 
+data <- readr::read_csv("../data_raw/15minBrazil/Time BTS_Pred_long_20200523_215519.csv",     col_types = cols(Date = col_date(format = "%Y-%m-%d"), Time = col_character()), 
     skip = 2)
 
 # Tidy Data ----
@@ -205,6 +205,10 @@ data <- data %>%
   mutate(daytype = ifelse(wday == 1 | wday == 7, 0, 1))
 ```
 
+
+## New Data Dataframe
+
+
 # Modeling
 ## Tsibble & Break Train & Test
 ```{r}
@@ -212,11 +216,22 @@ data_tsble <- as_tsibble(data, index=DateTime, key=Channel)
 data_train_tsble <- data_tsble %>% 
   filter_index(.~paste(DateCutoff))
 data_test_tsble <- data_tsble %>%  
-  filter_index(paste(DateCutoff)~.)
+  filter_index(paste(DateCutoff)~.) 
 ```
 
 
 ## Features
+```{r}
+NewData <- 
+  data.frame(DateTime = seq(from = DateEnd + as.duration('15 minutes'), to = DateEnd + as.period(ForecastHorizon), by = as.duration('15 minutes'))) %>% 
+  mutate(wday = wday(DateTime)) %>% 
+  mutate(daytype = ifelse(wday == 1 | wday == 7, 0, 1)) %>% 
+  mutate(date = date(DateTime)) %>% 
+  left_join(holidays_brazil, by= c("date" = "date")) %>% 
+  mutate(holidayflag = ifelse(is.na(holiday), 0, 1)) %>% 
+  select(-date) %>% 
+  tsibble()
+```
 
 
 
