@@ -1,0 +1,238 @@
+---
+title: "Ratings Forecasting"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::material:
+    highlight: kate
+---
+
+
+```{r setup, echo=FALSE, cache=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=FALSE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+
+
+# Loading Packages and Data Load
+## Setup Custom Functions 
+```{r}
+convert.to.sec <- function(X)
+{
+  X <- strsplit(X, ":")
+  sapply(X, function(Y) sum(as.numeric(Y) * c(3600, 60, 1)))
+}
+
+installpak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+}
+
+```
+
+## Load Packages
+```{r message=FALSE, warning=FALSE}
+
+RequiredPackages <- c( # Pacotes que uso, mas náo quero carregar, chamo funções de maneira declarada
+  "timeSeries" # Usado para criar o calendario (filho do fbasics da família Rmerics)
+  ,"data.table" # Uso o fread para importar e fundir as bases
+  ,"tictoc" # Controla o tempo 
+  ,"remotes" # Instalação dos pacotes do Github
+  ,"future" # Parallel Processing
+)
+
+#NonCRANPackages_b <-  c("mitchelloharawild/fable.prophet", "tidyverts/fasster")
+#remotes::install_github(NonCRANPackages_b)
+#rm(NonCRANPackages_b)
+
+LoadedPackages <- c(
+  "tidyverse" # Life
+  ,"skimr"
+  
+  #Calendar functions
+  ,"lubridate" # Dealing with time (ymd and others)
+  ,"timetk" # Exploratory
+
+  #Tidyverts
+  ,"tsibble"
+  ,"fable"
+  ,"feasts"
+  ,"fabletools"
+  
+  #Modeling
+  ,"prophet")
+
+NonCRANPackages <-  c(
+  "fable.prophet", 
+  "fasster")
+
+installpak(c(RequiredPackages, LoadedPackages))
+sapply(c(LoadedPackages, NonCRANPackages), require, character.only = TRUE)
+```
+
+## Load TXT Files to the envoriment and tidy data
+```{r}
+# Load TXT Files to the envoriment ----
+raw_path <- "./RawB/"
+filenames <- list.files(path=raw_path,
+                        pattern="*.*",
+                        recursive = TRUE)
+fullpath <- file.path(raw_path,filenames)
+
+ratings_raw <- lapply(fullpath, data.table::fread, skip = 2, sep = "\t", showProgress = FALSE,
+                      blank.lines.skip = TRUE, stringsAsFactors = TRUE,
+                      col.names = c("Country", "Channel", "Date", "Time", "Target", "ABS", "TRP"))
+ratings_raw_bind <- data.table::rbindlist(ratings_raw)
+
+# Tidy Data ----
+ratings_raw_bind$DateTime <- fast_strptime(as.character(ratings_raw_bind$Date), "%Y-%m-%d", tz="UTC", lt=FALSE) + 
+  seconds(convert.to.sec(as.character(ratings_raw_bind$Time))) 
+ratings_raw_bind[, c("Date","Time"):=NULL]
+
+data <- tibble::tibble(ratings_raw_bind)
+```
+
+```{r Clean the Load Environmet, message=FALSE, warning=FALSE}
+rm(ratings_raw, ratings_raw_bind, filenames, filepath, fullpath, raw_path, convert.to.sec)
+```
+
+# Exploratory
+## Seasonal
+```{r}
+data %>%
+  mutate(DateTime = ymd_h(paste(date(DateTime),hour(DateTime)))) %>% 
+  group_by(DateTime) %>% 
+  summarise(ABS = mean(ABS)) %>% 
+  plot_seasonal_diagnostics(DateTime, ABS, .feature_set	= c("hour", "wday.lbl", "month.lbl"), .interactive = TRUE)
+```
+
+```{r}
+data_tsble %>% autoplot(ABS)
+
+data_tsble %>% 
+    gg_season(ABS, period="day") + theme(legend.position = "none")
+
+data_tsble %>% 
+  gg_season(ABS, period="weekday") + theme(legend.position = "none")
+
+data_tsble %>% 
+  gg_subseries(ABS, period="year") 
+```
+
+# Feature Engineering
+## Holidays
+```{r Creating holiday}
+BYear <- year(min(data$DateTime))  
+EYear <- year(max(data$DateTime))+1
+```
+
+```{r}
+
+# Eu construo a base de dados de feriados porque prophet::generated_holidays náo tem os feriados eclesiásticos para o Brasil e a proclamação da república está em 5/11 e não 15/11. O timeDate::holiday não tem Brasil, por isso usei só o Easter dele e a partir da Páscoa estabeleço o Carnaval e o Corpus Christi. O bizdays:holidaysANBIMA não tem o nome dos feriados, o que não permite entender padrões entre os dipos de feriados (dummy por feriado que usa o nome do evento como factor).
+
+holidays_brazil_prophet <- 
+  tibble(ds= date(as.character()), weekday = integer(), holiday= as.character(), lower_window= integer(), upper_window= integer()) %>% 
+  add_row(ds = ymd(timeDate::Easter(BYear:EYear,-2)), holiday = "Easter Friday") %>% 
+  add_row(ds = ymd(timeDate::Easter(BYear:EYear,-48)), holiday = "Carnival Monday", lower_window = 0, upper_window = 0) %>% 
+  add_row(ds = ymd(timeDate::Easter(BYear:EYear,-47)), holiday = "Carnival Tuesday", lower_window = 0, upper_window = 0) %>% 
+  add_row(ds = ymd(timeDate::Easter(BYear:EYear,-46)), holiday = "Carnival Wednesday", lower_window = 0, upper_window = 0) %>% 
+  add_row(ds = ymd(timeDate::Easter(BYear:EYear,60)), holiday = "CorpusChristi") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-01-01")), ymd(paste0(EYear,"-01-01")), by="years"), holiday = "New Year's Day") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-01-25")), ymd(paste0(EYear,"-01-25")), by="years"), holiday = "Sao Paulo Anniversary") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-04-21")), ymd(paste0(EYear,"-04-21")), by="years"), holiday = "Tiradentes") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-05-01")), ymd(paste0(EYear,"-05-01")), by="years"), holiday = "Workers' Day") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-09-07")), ymd(paste0(EYear,"-09-07")), by="years"), holiday = "Independece Day") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-10-12")), ymd(paste0(EYear,"-10-12")), by="years"), holiday = "Our Lady of Apparition") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-11-02")), ymd(paste0(EYear,"-11-02")), by="years"), holiday = "All Souls' Day") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-11-15")), ymd(paste0(EYear,"-11-15")), by="years"), holiday = "Republic Day") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-11-20")), ymd(paste0(EYear,"-11-20")), by="years"), holiday = "Black Awareness Day") %>%
+  add_row(ds = seq(ymd(paste0(BYear,"-12-24")), ymd(paste0(EYear,"-12-24")), by="years"), holiday = "Christmas Eve") %>% 
+  add_row(ds = seq(ymd(paste0(BYear,"-12-25")), ymd(paste0(EYear,"-12-25")), by="years"), holiday = "Christmas Day") %>% 
+  add_row(ds = seq(ymd(paste0(BYear,"-12-31")), ymd(paste0(EYear,"-12-31")), by="years"), holiday = "New Year's Eve") %>%
+  mutate(
+    weekday = wday(ds),
+    lower_window = ifelse(is.na(lower_window), ifelse(weekday == 3, -1, 0), lower_window), 
+    upper_window = ifelse(is.na(upper_window), ifelse(weekday == 5, 1, 0), upper_window)) %>% 
+  arrange(ds)
+
+```
+
+```{r}
+holidays_brazil <- holidays_brazil_prophet %>% 
+  dplyr::filter(lower_window != 0 | upper_window != 0) %>% 
+  mutate(ds = (ds + days(upper_window) + days(lower_window)),
+         holiday = paste(holiday, " Bridge"),
+         lower_window = 0,
+         upper_window = 0) %>% 
+  bind_rows(holidays_brazil_prophet,.) %>% 
+  select(ds, holiday) %>% 
+  rename(date = ds) %>% 
+  distinct(date, .keep_all = TRUE) %>% 
+  arrange(date) %>% 
+  mutate(date = as.Date(as.POSIXct(date)))
+```
+
+```{r}
+data <- data %>% 
+  select(-holiday) %>% 
+  mutate(date = date(DateTime)) %>% 
+  left_join(holidays_brazil, by= c("date" = "date")) %>% 
+  mutate(holidayflag = ifelse(is.na(holiday),0,1)) %>% 
+  select(-date)
+```
+
+## Timetk Features
+```{r}
+data <- data %>% 
+  tk_augment_timeseries_signature(.date_var = DateTime)
+```
+
+# Modeling
+## Tsibble & Break Train & Test
+```{r}
+N <- "2019-11-01 06:00"
+data_tsble <- as_tsibble(data, index=DateTime, key=c(Country, Channel, Target))
+data_train_tsble <- data_tsble %>% 
+  filter_index(.~N)
+data_test_tsble <- data_tsble %>% 
+  filter_index(N~.)
+```
+
+## Modelling 
+```{r}
+tictoc::tic()
+plan(multiprocessr)
+data_train_fit <- data_train_tsble %>% 
+  select(-TRP) %>% 
+  model(
+    snaive = SNAIVE(ABS ~ lag("week")),
+    ets = ETS(log(ABS+1)),
+    arima1 = ARIMA(log(ABS+1)),
+    arima2 = ARIMA(log(ABS+1) ~ factor(wday.lbl) + factor(month) + factor(holidayflag) + PDQ(period="week")),
+    prophet = fable.prophet::prophet(log(ABS+1) ~ season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet)),
+    prophet_clean = fable.prophet::prophet(log(ABS+1)),
+    glm = TSLM(log(ABS+1) ~ lag(log(ABS+1),1) + lag(log(ABS+1),7*96) + factor(wday.lbl) + factor(month) + factor(holidayflag) + factor(hour))
+    )
+tictoc::toc()
+```
+
+
+```{r}
+data_test_forecast <- data_train_fit %>% 
+  select(-glm) %>% 
+  forecast(data_test_tsble, level=0)
+
+accuracy(data_test_forecast, data_test_tsble)
+```
+
