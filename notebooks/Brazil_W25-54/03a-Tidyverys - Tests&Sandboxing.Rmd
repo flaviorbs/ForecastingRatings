@@ -1,0 +1,92 @@
+---
+title: "Ratings Forecasting"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::material:
+    highlight: kate
+---
+# Loading Packages and Data Load
+## Setup Custom Functions
+```{r setup, echo=FALSE, cache=FALSE}
+source(here::here("/notebooks/Brazil_W25-54/00-Setup.R"))
+```
+
+# Modeling Tests
+## Prophet
+```{r}
+tictoc::tic()
+fit_train_prophet <- data_ts_train %>%
+  filter(Channel == "Discovery Channel") %>%
+  model(
+    pr1 = fable.prophet::prophet(log(ABS + 1) ~ month.lbl + season(period = 24*15) + season(period = 7*24*15) + holiday(holidays_brazil_prophet))
+  )
+tictoc::toc()
+
+accuracy(fit_train_prophet)
+```
+
+Observa-se que o modelo mais completo, com dummies de mês, ajusta melhoAr que os modelos menos completos.
+
+## Fasster
+```{r}
+future::plan("multiprocess")
+tictoc::tic()
+fit_train_fasster <- data_ts_train %>%
+  filter(
+    Channel == "Discovery Channel" # , DateTime >= DateStart + dyears(1)
+  ) %>%
+  model(
+    fasster1 = fasster::FASSTER(log(ABS + 1) ~ trend(1) + fourier(96, 12) + holidayflag),
+    fasster2 = fasster::FASSTER(log(ABS + 1) ~ factor(wday) %S% trend(1) + fourier(96, 6) + holidayflag),
+    fasster3 = fasster::FASSTER(log(ABS + 1) ~ trend(2) + fourier(96, 6) + fourier(24 * 4 * 7, 6) + holidayflag)
+  )
+tictoc::toc()
+
+accuracy(fit_train_fasster)
+```
+
+A Melhor performamce está no modelo simples,
+
+## TSLM
+```{r}
+tictoc::tic()
+fit_train_tslm <- data_ts_train %>%
+  filter(Channel == "Discovery Channel") %>%
+  model(
+    tslm1 = TSLM(log(ABS + 1) ~ factor(year) + factor(holidayflag) + factor(wday) + factor(month) + factor(time)),
+    tslm2 = TSLM(log(ABS + 1) ~ factor(year) + factor(holidayflag) + fourier("week", K = 6) + fourier("day", K = 6)),
+  )
+tictoc::toc()
+accuracy(fit_train_tslm)
+```
+
+## Arima
+```{r}
+tictoc::tic()
+fit_train_arima <- data_ts_train %>%
+  filter(Channel == "Discovery Channel") %>%
+  model(
+    arima1 = ARIMA(log(ABS + 1) ~ factor(holidayflag)),
+    arima2 = ARIMA(log(ABS + 1) ~ factor(wday) + factor(holidayflag)),
+    arima3 = ARIMA(log(ABS + 1) ~ factor(holidayflag) + fourier("week", K = 6) + fourier("day", K = 6))
+  )
+tictoc::toc()
+report(fit_train_arima)
+accuracy(fit_train_arima)
+```
+
+## ETS
+```{r}
+tictoc::tic()
+fit_train_ets <- data_ts_train %>%
+  filter(Channel == "Discovery Channel") %>%
+  model(
+    ets1 = ETS(log(ABS + 1)),
+    # ets2 = ETS(log(ABS + 1) ~ trend(method = c("A", "Ad")) + season(method = c("A", "M"), period = "1 day")) It doesn't work b/c ETS is limited to 24 obs/period and I have 96.
+  )
+tictoc::toc()
+accuracy(fit_train_ets)
+glimpse(fit_train_ets)
+```
+It clearly shows a over-fit issue. 
+I'd like to try to run my own Excel ETS algorithm where I do a single model for each weekday. The terms (Alpha, Beta, Phi) are reached through a single log-likelihood function. In my Excel model, I use Solver.

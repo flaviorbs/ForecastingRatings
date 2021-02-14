@@ -6,118 +6,122 @@ output:
     highlight: kate
 ---
 
-
 # Loading Packages and Data Load
 ## Setup Custom Functions
 ```{r setup, echo=FALSE, cache=FALSE}
 
 # Custom Functions
-  convert.to.sec <- function(X)
-  {
-    X <- strsplit(X, ":")
-    sapply(X, function(Y) sum(as.numeric(Y) * c(3600, 60, 1)))
+convert.to.sec <- function(X) {
+  X <- strsplit(X, ":")
+  sapply(X, function(Y) sum(as.numeric(Y) * c(3600, 60, 1)))
+}
+
+installpak <- function(pkg) {
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) {
+    install.packages(new.pkg, dependencies = TRUE)
   }
-  
-  installpak <- function(pkg){
-    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
-    if (length(new.pkg)) 
-      install.packages(new.pkg, dependencies = TRUE)
-  }
+}
 
 # Load Packages
-  RequiredPackages <- c( # Pacotes que uso, mas náo quero carregar, chamo funções de maneira declarada
-    "timeSeries" # Usado para criar o calendario (filho do fbasics da família Rmerics)
-    ,"data.table" # Uso o fread para importar e fundir as bases
-    ,"tictoc" # Controla o tempo 
-    ,"remotes" # Instalação dos pacotes do Github
-    ,"readr")
-  
-NonCRANPackages_b <-  c("mitchelloharawild/fable.prophet", "tidyverts/fasster")
-remotes::install_github(NonCRANPackages_b)
-rm(NonCRANPackages_b)
-  
-  LoadedPackages <- c(
-    "tidyverse" # Life
-    ,"skimr"
-    ,"future" # Parallel Processing
+## Pacotes não dispníveis no CRAN - Instalação
+#NonCRANPackages_b <- c("mitchelloharawild/fable.prophet", "tidyverts/fasster")
+#remotes::install_github(NonCRANPackages_b)
+#rm(NonCRANPackages_b)
 
-    #Calendar functions
-    ,"lubridate" # Dealing with time (ymd and others)
-    ,"timetk" # Exploratory
+## Pacores
+RequiredPackages <- c( # Pacotes que uso, mas não quero carregar, chamo funções de maneira declarada
+  "timeSeries" # Usado para criar o calendario (filho do fbasics da família Rmerics)
+  , "data.table" # Uso o fread para importar e fundir as bases
+  , "tictoc" # Controla o tempo
+  , "remotes" # Instalação dos pacotes do Github
+  , "future.apply"
+) # Required for Prophet
 
-    #Modeling
-    ,"prophet"
-    
-    #Tidyverts
-    ,"tsibble"
-    ,"fable"
-    ,"feasts"
-    ,"fabletools"
+LoadedPackages <- c(
+  "tidyverse" # Life
+  , "skimr",
+  "future" # Parallel Processing
 
-    #RMD
-    ,"knitr"
-    ,"rmdformats")
-  
-  NonCRANPackages <-  c(
-    "fable.prophet" 
-    ,"fasster")
+
+  # Calendar functions
+  , "lubridate" # Dealing with time (ymd and others)
+  , "timetk" # Exploratory
+
+  # Modeling
+  , "prophet"
+
+  # Tidyverts
+  , "tsibble",
+  "fable",
+  "feasts",
+  "fabletools"
+
+  # RMD
+  , "knitr",
+  "rmdformats"
+)
+
+NonCRANPackages <- c(
+  "fable.prophet",
+  "fasster"
+)
 
 installpak(c(RequiredPackages, LoadedPackages))
 sapply(c(LoadedPackages, NonCRANPackages), require, character.only = TRUE)
 
 # Global RMarkdown options
-  options(max.print="75")
-  opts_chunk$set(echo=FALSE,
-  	             cache=TRUE,
-                 prompt=FALSE,
-                 tidy=TRUE,
-                 comment=NA,
-                 message=FALSE,
-                 warning=FALSE)
-  opts_knit$set(width=75)
+options(max.print = "75")
+opts_chunk$set(
+  echo = FALSE,
+  cache = TRUE,
+  prompt = FALSE,
+  tidy = TRUE,
+  comment = NA,
+  message = FALSE,
+  warning = FALSE
+)
+opts_knit$set(width = 75)
+
+# Environment Options
+Sys.setenv("LANGUAGE" = "EN")
+Sys.setlocale("LC_ALL", "en_US.UTF-8")
+
+  rm(LoadedPackages, NonCRANPackages, RequiredPackages, installpak)
 
 ```
 
 ## Load TXT Files to the envoriment and tidy data
 ```{r}
 # Load TXT Files to the envoriment ----
-data <- readr::read_csv("../data_raw/15minBrazil/Time BTS_Pred_long_20200523_215519.csv",     col_types = cols(Date = col_date(format = "%Y-%m-%d"), Time = col_character()), 
-    skip = 2)
+raw_path <- "../data_raw/15minBrazil/"
+filenames <- list.files(
+  path = raw_path,
+  pattern = "*.*",
+  recursive = TRUE
+)
+fullpath <- file.path(raw_path, filenames)
+
+ratings_raw <- lapply(fullpath, data.table::fread,
+  skip = 2, sep = ",", showProgress = FALSE,
+  blank.lines.skip = TRUE, stringsAsFactors = FALSE,
+  col.names = c("Channel", "Date", "Time", "Target", "TRP", "ABS")
+)
+data <- data.table::rbindlist(ratings_raw)
 
 # Tidy Data ----
-data <- data %>% 
-  mutate(DateTime = 
-           fast_strptime(as.character(data$Date), "%Y-%m-%d", tz="UTC", lt=FALSE) + 
-           seconds(convert.to.sec(data$Time))) %>% 
-  select(-Date, -Time, DateTime, Channel = 'Channel Group ...', TRP = 'TRP (avgW)', ABS = "'000 (avg)")
-```
+data <- data %>%
+  tibble() %>%
+  mutate(
+    DateTime =
+      fast_strptime(Date, "%Y-%m-%d", tz = "UTC", lt = FALSE) +
+        seconds(convert.to.sec(data$Time)),
+    Channel = as.factor(Channel),
+    Target = as.factor(Target)
+  ) %>%
+  select(-Date, -Time)
 
-# Exploratory
-## Seasonal
-```{r eval=FALSE, include=FALSE}
-data %>%
-  mutate(DateTime = ymd_h(paste(date(DateTime),hour(DateTime)))) %>% 
-  group_by(DateTime) %>% 
-  summarise(ABS = mean(ABS)) %>% 
-  plot_seasonal_diagnostics(DateTime, ABS, .feature_set	= c("hour", "wday.lbl", "month.lbl"), .interactive = TRUE)
-```
-
-```{r eval=FALSE, include=FALSE}
-data_tsble %>% autoplot(ABS)
-
-data_tsble %>% 
-    gg_season(ABS, period="day") + theme(legend.position = "none")
-
-data_tsble %>% 
-  gg_season(ABS, period="weekday") + theme(legend.position = "none")
-
-data_tsble %>% 
-  gg_subseries(ABS, period="year") 
-
-data_tsble %>% 
-  features(ABS, feat_stl)
-
-
+rm(ratings_raw, filenames, fullpath, raw_path, convert.to.sec)
 ```
 
 # Feature Engineering
@@ -127,12 +131,14 @@ DateStart <- min(data$DateTime)
 DateEnd <- max(data$DateTime)
 DateCutoff <- DateStart + hours(
   round(
-    0.9*
+    0.9 *
       time_length(lubridate::interval(DateStart, DateEnd), "hour"),
-    0))
-ForecastHorizon <- "6 months"  #Used on final forecast
-YearStart <- year(DateStart) #Used on Holidays Tsibble / data.frame
-YearEnd <- year(DateEnd + as.duration(ForecastHorizon))  #Used on Holidays Tsibble / data.frame
+    0
+  )
+)
+ForecastHorizon <- "6 months" # Used on final forecast
+YearStart <- year(DateStart) # Used on Holidays Tsibble / data.frame
+YearEnd <- year(DateEnd + as.duration(ForecastHorizon)) # Used on Holidays Tsibble / data.frame
 ```
 
 ## Holidays
@@ -145,96 +151,99 @@ I also use the weekdays to understand bridges of long weekends.
 
 ```{r Creating holiday}
 # First on Prophet format
-holidays_brazil_prophet <- 
-  tibble(ds= date(as.character()), weekday = integer(), holiday= as.character(), lower_window= integer(), upper_window= integer()) %>% 
-  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd,-2)), holiday = "Easter Friday") %>% 
-  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd,-48)), holiday = "Carnival Monday", lower_window = 0, upper_window = 0) %>% 
-  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd,-47)), holiday = "Carnival Tuesday", lower_window = 0, upper_window = 0) %>% 
-  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd,-46)), holiday = "Carnival Wednesday", lower_window = 0, upper_window = 0) %>% 
-  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd,60)), holiday = "CorpusChristi") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-01-01")), ymd(paste0(YearEnd,"-01-01")), by="years"), holiday = "New Year's Day") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-01-25")), ymd(paste0(YearEnd,"-01-25")), by="years"), holiday = "Sao Paulo Anniversary") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-04-21")), ymd(paste0(YearEnd,"-04-21")), by="years"), holiday = "Tiradentes") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-05-01")), ymd(paste0(YearEnd,"-05-01")), by="years"), holiday = "Workers' Day") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-09-07")), ymd(paste0(YearEnd,"-09-07")), by="years"), holiday = "Independece Day") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-10-12")), ymd(paste0(YearEnd,"-10-12")), by="years"), holiday = "Our Lady of Apparition") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-11-02")), ymd(paste0(YearEnd,"-11-02")), by="years"), holiday = "All Souls' Day") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-11-15")), ymd(paste0(YearEnd,"-11-15")), by="years"), holiday = "Republic Day") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-11-20")), ymd(paste0(YearEnd,"-11-20")), by="years"), holiday = "Black Awareness Day") %>%
-  add_row(ds = seq(ymd(paste0(YearStart,"-12-24")), ymd(paste0(YearEnd,"-12-24")), by="years"), holiday = "Christmas Eve") %>% 
-  add_row(ds = seq(ymd(paste0(YearStart,"-12-25")), ymd(paste0(YearEnd,"-12-25")), by="years"), holiday = "Christmas Day") %>% 
-  add_row(ds = seq(ymd(paste0(YearStart,"-12-31")), ymd(paste0(YearEnd,"-12-31")), by="years"), holiday = "New Year's Eve") %>%
+holidays_brazil_prophet <-
+  tibble(ds = date(as.character()), weekday = integer(), holiday = as.character(), lower_window = integer(), upper_window = integer()) %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, -2)), holiday = "Easter Friday") %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, -48)), holiday = "Carnival Monday", lower_window = 0, upper_window = 0) %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, -47)), holiday = "Carnival Tuesday", lower_window = 0, upper_window = 0) %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, -46)), holiday = "Carnival Wednesday", lower_window = 0, upper_window = 0) %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, 60)), holiday = "CorpusChristi") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-01-01")), ymd(paste0(YearEnd, "-01-01")), by = "years"), holiday = "New Year's Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-01-25")), ymd(paste0(YearEnd, "-01-25")), by = "years"), holiday = "Sao Paulo Anniversary") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-04-21")), ymd(paste0(YearEnd, "-04-21")), by = "years"), holiday = "Tiradentes") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-05-01")), ymd(paste0(YearEnd, "-05-01")), by = "years"), holiday = "Workers' Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-09-07")), ymd(paste0(YearEnd, "-09-07")), by = "years"), holiday = "Independece Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-10-12")), ymd(paste0(YearEnd, "-10-12")), by = "years"), holiday = "Our Lady of Apparition") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-11-02")), ymd(paste0(YearEnd, "-11-02")), by = "years"), holiday = "All Souls' Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-11-15")), ymd(paste0(YearEnd, "-11-15")), by = "years"), holiday = "Republic Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-11-20")), ymd(paste0(YearEnd, "-11-20")), by = "years"), holiday = "Black Awareness Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-12-24")), ymd(paste0(YearEnd, "-12-24")), by = "years"), holiday = "Christmas Eve") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-12-25")), ymd(paste0(YearEnd, "-12-25")), by = "years"), holiday = "Christmas Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-12-31")), ymd(paste0(YearEnd, "-12-31")), by = "years"), holiday = "New Year's Eve") %>%
   mutate(
     weekday = wday(ds),
-    lower_window = ifelse(is.na(lower_window), ifelse(weekday == 3, -1, 0), lower_window), 
-    upper_window = ifelse(is.na(upper_window), ifelse(weekday == 5, 1, 0), upper_window)) %>%   
-  arrange(ds) 
+    lower_window = ifelse(is.na(lower_window), ifelse(weekday == 3, -1, 0), lower_window),
+    upper_window = ifelse(is.na(upper_window), ifelse(weekday == 5, 1, 0), upper_window)
+  ) %>%
+  arrange(ds)
 ```
 
 ```{r converting holidays to long format}
-holidays_brazil <- holidays_brazil_prophet %>% 
-  dplyr::filter(lower_window != 0 | upper_window != 0) %>% 
-  mutate(ds = (ds + days(upper_window) + days(lower_window)),
-         holiday = paste(holiday, " Bridge"),
-         lower_window = 0,
-         upper_window = 0) %>% 
-  bind_rows(holidays_brazil_prophet,.) %>% 
-  select(ds, holiday) %>% 
-  rename(date = ds) %>% 
-  distinct(date, .keep_all = TRUE) %>% 
-  arrange(date) %>% 
+holidays_brazil <- holidays_brazil_prophet %>%
+  dplyr::filter(lower_window != 0 | upper_window != 0) %>%
+  mutate(
+    ds = (ds + days(upper_window) + days(lower_window)),
+    holiday = paste(holiday, " Bridge"),
+    lower_window = 0,
+    upper_window = 0
+  ) %>%
+  bind_rows(holidays_brazil_prophet, .) %>%
+  select(ds, holiday) %>%
+  rename(date = ds) %>%
+  distinct(date, .keep_all = TRUE) %>%
+  arrange(date) %>%
   mutate(date = as.Date(as.POSIXct(date)))
 ```
 
 ```{r incorporate holidays to data}
-data <- data %>% 
-  mutate(date = date(DateTime)) %>% 
-  left_join(holidays_brazil, by= c("date" = "date")) %>% 
-  mutate(holidayflag = ifelse(is.na(holiday), 0, 1)) %>% 
+data <- data %>%
+  mutate(date = date(DateTime)) %>%
+  left_join(holidays_brazil, by = c("date" = "date")) %>%
+  mutate(holidayflag = ifelse(is.na(holiday), 0, 1)) %>%
   select(-date)
 
-holidays_brazil_prophet <- as.tsibble(holidays_brazil_prophet)
-
+holidays_brazil_prophet <- as_tsibble(holidays_brazil_prophet, index = ds)
 ```
 
-## Timetk Features
+## Other Features
 Besides holidays, I'm activelly adding more variables to the model so we can have more elements to fit a Linear Model (GLM) or Neural Network.
 ```{r}
-data <- data %>% 
-  tk_augment_timeseries_signature(.date_var = DateTime) %>% 
-  mutate(daytype = ifelse(wday == 1 | wday == 7, 0, 1))
+data <- data %>%
+  tk_augment_timeseries_signature(.date_var = DateTime) %>%
+  mutate(daytype = ifelse(wday == 1 | wday == 7, 0, 1)) %>%
+  mutate(time = hms::hms(as.numeric(DateTime - floor_date(DateTime, "1 day"), unit = "secs")))
 ```
 
 
-## New Data Dataframe
-
-
-# Modeling
 ## Tsibble & Break Train & Test
 ```{r}
-data_tsble <- as_tsibble(data, index=DateTime, key=Channel)
-data_train_tsble <- data_tsble %>% 
-  filter_index(.~paste(DateCutoff))
-data_test_tsble <- data_tsble %>%  
-  filter_index(paste(DateCutoff)~.) 
+data_ts <- as_tsibble(data, index = DateTime, key = c("Channel", "Target"))
+data_ts_train <- data_ts %>%
+  filter_index(. ~ paste(DateCutoff))
+data_ts_test <- data_ts %>%
+  filter_index(paste(DateCutoff) ~ .)
 ```
 
-
-## Features
+## Future Data
 ```{r}
-NewData <- 
-  data.frame(DateTime = seq(from = DateEnd + as.duration('15 minutes'), to = DateEnd + as.period(ForecastHorizon), by = as.duration('15 minutes'))) %>% 
-  mutate(wday = wday(DateTime)) %>% 
-  mutate(daytype = ifelse(wday == 1 | wday == 7, 0, 1)) %>% 
-  mutate(date = date(DateTime)) %>% 
-  left_join(holidays_brazil, by= c("date" = "date")) %>% 
-  mutate(holidayflag = ifelse(is.na(holiday), 0, 1)) %>% 
-  select(-date) %>% 
-  tsibble()
+ChannelsTargets <- data %>%
+  select(Target, Channel) %>%
+  distinct(Target, Channel)
+
+data_ts_future <-
+  data.frame(DateTime = seq(from = DateEnd + as.duration("15 minutes"), to = DateEnd + as.period(ForecastHorizon), by = as.duration("15 minutes"))) %>%
+  mutate(daytype = ifelse(wday(DateTime) == 1 | wday(DateTime) == 7, 0, 1)) %>%
+  mutate(time = hms::hms(as.numeric(DateTime - floor_date(DateTime, "1 day"), unit = "secs"))) %>%
+  mutate(date = date(DateTime)) %>%
+  left_join(holidays_brazil, by = c("date" = "date")) %>%
+  mutate(holidayflag = ifelse(is.na(holiday), 0, 1)) %>%
+  select(-date) %>%
+  tk_augment_timeseries_signature(.date_var = DateTime) %>%
+  merge(ChannelsTargets) %>%
+  as_tsibble(index = DateTime, key = c("Channel", "Target"))
 ```
 
-
-
+# Modeling Tests
 ## Prophet
 I'm going to evaluate Prophet performance over the train data and one channel.
 
@@ -242,11 +251,13 @@ This way I'll better understand how the model behaves and chose a single model.
 
 ```{r}
 tictoc::tic()
-fit_train_prophet <- data_train_tsble %>% 
-  filter(Channel == "Discovery Channel") %>% 
-  model(pr1 = fable.prophet::prophet(log(ABS+1) ~ month.lbl + season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet)),
-        pr2 = fable.prophet::prophet(log(ABS+1) ~ season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet)),
-        pr3 = fable.prophet::prophet(log(ABS+1) ~ season(period = "week") + season(period = "day")))
+fit_train_prophet <- data_ts_train %>%
+  filter(Channel == "Discovery Channel") %>%
+  model(
+    pr1 = fable.prophet::prophet(log(ABS + 1) ~ month.lbl + season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet)),
+    pr2 = fable.prophet::prophet(log(ABS + 1) ~ season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet)),
+    pr3 = fable.prophet::prophet(log(ABS + 1) ~ season(period = "week") + season(period = "day"))
+  )
 tictoc::toc()
 
 accuracy(fit_train_prophet)
@@ -256,36 +267,94 @@ Observa-se que o modelo mais completo, com dummies de mês, ajusta melhor que os
 
 ## Fasster
 ```{r}
+future::plan("multiprocess")
 tictoc::tic()
-fit_train_fasster <- data_train_tsble %>% 
-  filter(Channel == "Discovery Channel") %>% 
-  model(fasster1 = fasster::FASSTER(log(ABS+1) ~ poly(1) + trig(96, 16) + holidayflag + daytype))
+fit_train_fasster <- data_ts_train %>%
+  filter(
+    Channel == "Discovery Channel" # , DateTime >= DateStart + dyears(1)
+  ) %>%
+  model(
+    fasster1 = fasster::FASSTER(log(ABS + 1) ~ trend(1) + fourier(96, 12) + holidayflag),
+    fasster2 = fasster::FASSTER(log(ABS + 1) ~ factor(wday) %S% trend(1) + fourier(96, 6) + holidayflag),
+    fasster3 = fasster::FASSTER(log(ABS + 1) ~ trend(2) + fourier(96, 6) + fourier(24 * 4 * 7, 6) + holidayflag)
+  )
 tictoc::toc()
 
 accuracy(fit_train_fasster)
 ```
 
+A Melhor performamce está no modelo simples,
+
+## TSLM
+```{r}
+tictoc::tic()
+fit_train_tslm <- data_ts_train %>%
+  filter(Channel == "Discovery Channel") %>%
+  model(
+    tslm1 = TSLM(log(ABS + 1) ~ factor(year) + factor(holidayflag) + factor(wday) + factor(month) + factor(time)),
+    tslm2 = TSLM(log(ABS + 1) ~ factor(year) + factor(holidayflag) + fourier("week", K = 6) + fourier("day", K = 6)),
+  )
+tictoc::toc()
+accuracy(fit_train_tslm)
+```
+
 ## Arima
 ```{r}
 tictoc::tic()
-fit_train_other <- data_train_tsble %>% 
-  filter(Channel == "Discovery Channel") %>% 
-  model(arima1 = ARIMA(log(ABS+1) ~ factor(holidayflag)))
+fit_train_arima <- data_ts_train %>%
+  filter(Channel == "Discovery Channel") %>%
+  model(
+    arima1 = ARIMA(log(ABS + 1) ~ factor(holidayflag)),
+    arima2 = ARIMA(log(ABS + 1) ~ factor(wday) + factor(holidayflag)),
+    arima3 = ARIMA(log(ABS + 1) ~ factor(holidayflag) + fourier("week", K = 6) + fourier("day", K = 6))
+  )
 tictoc::toc()
-accuracy(fit_train_other)
-
+report(fit_train_arima)
+accuracy(fit_train_arima)
 ```
 
+## ETS
 ```{r}
-
-temp <- fit_train_other %>% 
-  select(arima) %>% 
-  report()
-
+tictoc::tic()
+fit_train_ets <- data_ts_train %>%
+  filter(Channel == "Discovery Channel") %>%
+  model(
+    ets1 = ETS(log(ABS + 1)),
+    # ets2 = ETS(log(ABS + 1) ~ trend(method = c("A", "Ad")) + season(method = c("A", "M"), period = "1 day")) It doesn't work b/c ETS is limited to 24 obs/period and I have 96.
+  )
+tictoc::toc()
+accuracy(fit_train_ets)
+glimpse(fit_train_ets)
 ```
+It clearly shows a over-fit issue. 
+I'd like to try to run my own Excel ETS algorithm where I do a single model for each weekday. The terms (Alpha, Beta, Phi) are reached through a single log-likelihood function. In my Excel model, I use Solver.
 
 
+# Final model
+```{r}
+future::plan("default")
+tictoc::tic()
+fit_train_prt <- data_ts_train %>%
+  model(
+    pr1 = fable.prophet::prophet(log(ABS + 1) ~ month.lbl + season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet)),
+    pr2 = fable.prophet::prophet(log(ABS + 1) ~ season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet))
+  )
+tictoc::toc()
 
+future::plan("multiprocess")
+tictoc::tic()
+fit_train_oth <- data_ts_train %>%
+  model(
+    fasster1 = fasster::FASSTER(log(ABS + 1) ~ trend(1) + fourier(96, 12) + holidayflag),
+    fasster3 = fasster::FASSTER(log(ABS + 1) ~ trend(2) + fourier(96, 6) + fourier(24 * 4 * 7, 6) + holidayflag),
+    tslm2 = TSLM(log(ABS + 1) ~ factor(year) + factor(holidayflag) + fourier("week", K = 6) + fourier("day", K = 6)),
+    arima3 = ARIMA(log(ABS + 1) ~ factor(holidayflag) + fourier("week", K = 6) + fourier("day", K = 6)),
+    ets = ETS(log(ABS + 1)),
+  )
+tictoc::toc()
+
+fit_train <- left_join(fit_train_prt, fit_train_oth, by = c("Channel", "Target"))
+```
 
 
 ### Analysis of results
@@ -297,46 +366,57 @@ fit_train %>%
 
 ## Forecast Test
 ```{r}
-forecast_test <- fit_train %>% 
-  select(-glm) %>% 
-  forecast(data_test_tsble)
+forecast_test <- fit_train %>%
+  select(-tslm2) %>% 
+  forecast(data_ts_test)
 ```
 
 ### Analysis of Results
 ```{r}
-accuracy(forecast_test, data_test_tsble) %>% 
-  arrange(Channel, MASE)
+accuracy(forecast_test, data_ts_test) %>%
+  arrange(Channel, RMSE)
 ```
 
 # Forecasting
 ## Modelling with full dataset
 ```{r}
+future::plan("default")
 tictoc::tic()
-future::plan("multiprocess") # Não adianta muito porque o Prophet não paralelilza
-fit <- data_tsble %>% 
-  select(-TRP) %>% 
+fit <- data_ts %>%
+  filter(DateTime >= ymd_hms("2019-01-01 06:00:00", tz = "UTC")) %>% 
   model(
-    prophet = fable.prophet::prophet(log(ABS+1) ~ season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet))) 
+    prophet = fable.prophet::prophet(log(ABS + 1) ~ season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet))
+  ) 
+
 tictoc::toc()
 ```
 
 ## Forecasting
 ```{r}
-forecast <- fit %>% 
-  forecast(h="3 months")
+forecast <- fit %>%
+  forecast(h = "3 months")
+```
+
+## Evaluation
+```{r}
+  forecast %>% 
+  filter(DateTime < DateEnd + dweeks(1)) %>% 
+  autoplot(filter(data_ts, DateTime >= DateEnd - dweeks(1))) +
+  facet_wrap(vars(Channel), ncol = 3, scales = "free")
 ```
 
 
 # Export
 ```{r}
-forecast %>% 
-  #hilo(level = 80) %>% 
-  #unnest_wider('80%') %>% 
-  as_tibble() %>% 
-  select(-.model, -.distribution) %>% 
-  mutate(ABS = round(ABS, 3)) %>% 
-  data.table::fwrite(file = "forecast.csv", sep=",", dec = ".")
+forecast %>%
+  # hilo(level = 80) %>%
+  # unnest_wider('80%') %>%
+  as_tibble() %>%
+  select(-.model, -ABS) %>%
+  rename(ABS = .mean) %>%
+  mutate(Date = date(DateTime),
+         Time = substr(as.character(DateTime), nchar(as.character(DateTime)) - (8-1), nchar(as.character(DateTime))),
+         ABS = round(ABS,3)
+        ) %>% 
+  data.table::fwrite(file = "../data_output/forecast.csv", sep = ",", dec = ".")
 ```
-
-
-

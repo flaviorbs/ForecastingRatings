@@ -1,0 +1,106 @@
+---
+title: "Ratings Forecasting"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::material:
+    highlight: kate
+---
+
+# Loading Packages and Data Load
+## Setup Custom Functions
+```{r setup, echo=FALSE, cache=FALSE}
+source(here::here("/notebooks/Brazil_W25-54/00-Setup.R"))
+```
+
+# Final model
+```{r}
+future::plan("default")
+tictoc::tic()
+fit_train_prt <- data_ts_train %>%
+  model(
+    pr1 = fable.prophet::prophet(log(ABS + 1) ~ month.lbl + season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet)),
+    pr2 = fable.prophet::prophet(log(ABS + 1) ~ season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet))
+  )
+tictoc::toc()
+
+future::plan("multiprocess")
+tictoc::tic()
+fit_train_oth <- data_ts_train %>%
+  model(
+    fasster1 = fasster::FASSTER(log(ABS + 1) ~ trend(1) + fourier(96, 12) + holidayflag),
+    fasster3 = fasster::FASSTER(log(ABS + 1) ~ trend(2) + fourier(96, 6) + fourier(24 * 4 * 7, 6) + holidayflag),
+    tslm2 = TSLM(log(ABS + 1) ~ factor(year) + factor(holidayflag) + fourier("week", K = 6) + fourier("day", K = 6)),
+    arima3 = ARIMA(log(ABS + 1) ~ factor(holidayflag) + fourier("week", K = 6) + fourier("day", K = 6)),
+    ets = ETS(log(ABS + 1)),
+  )
+tictoc::toc()
+
+fit_train <- left_join(fit_train_prt, fit_train_oth, by = c("Channel", "Target"))
+```
+
+
+### Analysis of results
+```{r}
+fit_train %>%
+  accuracy() %>%
+  arrange(Channel, MASE)
+```
+
+## Forecast Test
+```{r}
+forecast_test <- fit_train %>%
+  select(-tslm2) %>% 
+  forecast(data_ts_test)
+```
+
+### Analysis of Results
+```{r}
+accuracy(forecast_test, data_ts_test) %>%
+  arrange(Channel, RMSE)
+```
+
+# Forecasting
+## Modelling with full dataset
+```{r}
+future::plan("default")
+tictoc::tic()
+fit <- data_ts %>%
+  filter(DateTime >= ymd_hms("2019-01-01 06:00:00", tz = "UTC")) %>% 
+  model(
+    prophet = fable.prophet::prophet(log(ABS + 1) ~ season(period = "week") + season(period = "day") + holiday(holidays_brazil_prophet))
+  ) 
+
+tictoc::toc()
+```
+
+## Forecasting
+```{r}
+forecast <- fit %>%
+  forecast(h = "3 months")
+```
+
+## Evaluation
+```{r}
+  forecast %>% 
+  filter(DateTime < DateEnd + dweeks(1)) %>% 
+  autoplot(filter(data_ts, DateTime >= DateEnd - dweeks(1))) +
+  facet_wrap(vars(Channel), ncol = 3, scales = "free")
+```
+
+
+# Export
+```{r}
+forecast %>%
+  # hilo(level = 80) %>%
+  # unnest_wider('80%') %>%
+  as_tibble() %>%
+  select(-.model, -ABS) %>%
+  rename(ABS = .mean) %>%
+  mutate(Date = date(DateTime),
+         Time = substr(as.character(DateTime), nchar(as.character(DateTime)) - (8-1), nchar(as.character(DateTime))),
+         ABS = round(ABS,3)
+        ) %>% 
+  data.table::fwrite(file = "./data_output/forecast.csv", sep = ",", dec = ".")
+
+getwd()
+```

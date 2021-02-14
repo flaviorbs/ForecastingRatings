@@ -1,0 +1,83 @@
+---
+title: "Ratings Forecasting - Models Modeltime"
+date: "`r Sys.Date()`"
+---
+
+# Loading Packages and Data Load
+```{r setup, echo=FALSE, cache=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+source(here::here("/notebooks/Brazil_W25-54/00-Setup.R"))
+load(here::here("/data/data.Rdata"))
+```
+
+# 
+
+```{r}
+library(sugrrants)
+prettify(
+  data_ts %>% 
+  mutate(Date = date(DateTime),
+         hourminute = hour + minute/100) %>%
+  filter(Channel == "Discovery Channel", year >= 2019) %>% 
+  frame_calendar(x = hourminute, y = ABS, date = Date) %>% 
+  ggplot(aes(x = .hourminute, y = .ABS, group = Date)) +
+  geom_line() +
+  theme(legend.position = "bottom")
+  )
+
+```
+
+```{r}
+library(dplyr)
+library(sugrrants)
+  data_ts %>% 
+  mutate(Date = date(DateTime),
+         hourminute = hour + minute/100) %>%
+  filter(Channel == "Discovery Channel", Date >= date("2020-05-01")) %>% 
+  ggplot(aes(x = hourminute, y = ABS)) +
+  geom_line() +
+  facet_calendar(~ Date) + # a variable contains dates
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+
+```
+
+```{r}
+library(dplyr)
+library(sugrrants)
+  data_ts %>% 
+    mutate(Date = date(DateTime),
+         hourminute = hour + minute/100) %>%
+    filter(Channel == "Discovery Channel", Date >= date("2020-06-01")) %>%
+    group_by(Date, hour) %>% 
+    mutate(HourABS = mean(ABS)) %>% 
+    ggplot(aes(x = hourminute)) +
+    geom_line(aes(y = ABS, colour="ABS")) +
+    geom_line(aes(y = HourABS, colour="HourABS")) +        
+    facet_calendar(~ Date) + # a variable contains dates
+    theme_bw() +
+    theme(legend.position = "bottom")
+
+```
+
+```{r, fig.width=8, fig.height=16}
+data_ts %>% 
+  filter(DateTime >= date("2020-01-01")) %>%
+  group_by(Channel) %>% 
+  mutate(lag_ABS = lag_vec(ABS, lag = 4*24*7)) %>% 
+  timetk::plot_anomaly_diagnostics(DateTime, lag_ABS, .interactive = TRUE, .facet_ncol = 2)
+```
+
+```{r, fig.width=8, fig.height=16}
+data_ts %>% 
+  filter(Channel == "Discovery Channel", DateTime >= date("2020-01-01")) %>%
+  timetk::plot_seasonal_diagnostics(DateTime, ABS, .interactive = FALSE)
+```
+
+```{r}
+data_ts %>% 
+  filter(Channel == "Discovery Channel", DateTime >= date("2019-06-01")) %>%
+  plot_acf_diagnostics(DateTime, ABS, .lags = "3 weeks", .interactive = FALSE)
+```
+

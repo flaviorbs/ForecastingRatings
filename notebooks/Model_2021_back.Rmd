@@ -1,0 +1,77 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r xml2 working in progress}
+
+data_forecast_bkp <- data_forecast
+
+data_forecast <- data_forecast %>% 
+  filter(channel == "DCBR")
+
+
+library(xml2)
+for(chn in unique(data_forecast$channel)){
+  x2 <- xml_new_document(version="1.0", encoding="UTF-8")
+  xml_add_child(x2, "Channel", name = chn) 
+  for(dt in data_forecast %>% filter(channel == chn) %>% distinct(date) %>% pull){
+      xml_add_child(x2, "Date", value = dt)
+      xml_add_child(x2, "Targets")
+      for(tgt in data_forecast %>% filter(channel == chn, date == dt) %>% distinct(target) %>% pull){
+        xml_add_child(x2, "Target", Code = tgt)
+        dp <- data_forecast %>% 
+          filter(channel == chn, date == dt, target == tgt) %>% 
+          select(Time, AudiencePercent) 
+          sapply(1:dim(dp)[1], function(i) {
+            xml_add_child(.x=x2,.value="Daypart",Time=dp$Time[i],AudiencePercent=dp$AudiencePercent[i])
+            })
+        }
+    }
+  }
+
+message(x2)
+
+
+```
+
+```{r}
+x2 <- xml_new_document(version="1.0", encoding="UTF-8")
+  x2 %>% xml_add_child(., "Channel", name = "Discovery") %>% 
+    {
+      xml_add_child(., "Date", value ="1234")
+      xml_add_child(., "Date", value ="5678")
+    } 
+  
+message(x2) 
+  
+
+data_forecast %>% filter(target == "A18+")
+
+forecast_prophet %>% filter(target == "A18+")
+
+
+x2 <- xml_new_document(version="1.0", encoding="UTF-8")
+data_forecast %>% 
+          filter(channel == "APBR", date == "2021/02/11", target == "Brazil A18-49 HM") %>% 
+  1:dim(.)[1]
+
+    sapply(1:dim(.)[1], function(i){xml_add_child(.x=x2, .value="Daypart", Time=.$Time[i], AudiencePercent=.$AudiencePercent[i])})
+
+
+```
+
+```{r}
+
+diag <- data.frame(level=c(3,3),description=c('a log message','a second log message'),stringsAsFactors = F)
+
+x2 <- xml_new_root("Diag")
+sapply(1:dim(diag)[1], function(i) {
+  xml_add_child(.x=x2,.value="line",level=diag$level[i],description=diag$description[i])
+}
+)
+message(x2)
+
+
+```
+

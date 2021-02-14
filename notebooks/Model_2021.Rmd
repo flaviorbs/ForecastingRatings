@@ -1,0 +1,176 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tsibble)
+library(fable)
+library(fable.prophet)
+library(fasster)
+library(lubridate)
+library(readxl)
+
+```
+
+
+```{r}
+demos <- read_excel("../Mappings.xlsx", sheet = "targets_universes") %>% 
+  janitor::clean_names()
+
+map_channels <- read_excel("../Mappings.xlsx", sheet = "channels") %>% 
+  janitor::clean_names()
+
+source("../dsc_functions_assets.r")
+
+generate_brazil_holidays_prophet(2019,2022)
+
+```
+
+
+```{r Import - Airlog}
+# Importing Data
+library(readr)
+data_airlog <- read_csv("../data_raw/AirLogBrazil/AirLog Airlog_Brazil_fct.csv", 
+    col_types = cols(Date = col_date(format = "%Y-%m-%d"), 
+        Time = col_character(), To = col_character(), 
+        `Dur sec` = col_integer()))
+
+# Tidy Data
+data_airlog_tidy <- data_airlog %>%
+  filter(`Air Type` == "Promo" | `Air Type` == "Spot") %>% 
+  pivot_longer(cols = 9:ncol(.), names_to = "target", values_to = "abs") %>% 
+  janitor::clean_names() %>% 
+  mutate(
+    datetime = date +
+        seconds(convert.to.sec(.$time))) %>%
+  rename("techedge_country" = "country", "techedge_channel" = "channel") %>% 
+  left_join(map_channels %>% select(-ibms_feed_name), by = c("techedge_country", "techedge_channel")) %>% 
+  select(-techedge_country, -techedge_channel, -date, -time, -to)
+
+```
+
+
+```{r Consolidate in 15 min windows}
+data_rat_spots_15min <-  data_airlog_tidy %>% 
+  mutate(time_window_15min = floor_date(datetime, unit = "15 minutes"),
+         target = str_replace_all(target, "HighMediumSEL \\+ PayTV", "HM" ) %>% 
+           str_remove_all("'000 | Pay TV") %>% 
+           str_replace("HW HM", "HM Housewives")
+         ) %>% 
+  left_join(demos %>% select(country, demo, bts_demo_id), by = c("country","target" = "demo")) %>% 
+  filter(!is.na(bts_demo_id)) %>% 
+  group_by(country, ibms_feed_id, bts_demo_id, time_window_15min) %>% 
+  summarise(mean_15min = mean(abs), .groups ="drop") %>% 
+  tsibble(key = c("country", "ibms_feed_id", "bts_demo_id"), index = time_window_15min) %>% 
+  fill_gaps() %>% 
+  group_by_key() %>% 
+  tidyr::fill(mean_15min, .direction = "down")
+```
+
+
+# Training Model
+
+```{r Creacte train DB}
+# Create Train
+data_rat_spots_15min_tr <- data_rat_spots_15min %>% 
+  filter(time_window_15min <= max(data_rat_spots_15min$time_window_15min) - weeks(2))
+
+```
+
+```{r Prophet Modelling}
+library(future)
+plan(multisession)
+options(future.rng.onMisue = "ignore")
+Sys.setenv(R_FUTURE_RNG_ONMISUSE = "ignore")
+
+fit_tr_prophet <- data_rat_spots_15min_tr %>% 
+  model(
+    prophet = prophet(log(mean_15min + 1)  ~ season("day", 4, type = "additive") +  season("week", 4, type = "additive")))
+
+
+fit_tr_fasster <- data_rat_spots_15min_tr %>% 
+  model(fasster = FASSTER(log(mean_15min + 1) ~ fourier(period = "1 day", K = 6) + fourier(period = "1 week" , K = 6))
+  )
+
+fit_tr_naive <- data_rat_spots_15min_tr %>% 
+  model(naive = SNAIVE(mean_15min ~ lag("week")))
+
+fit_tr <- fit_tr_prophet %>% 
+  left_join(fit_tr_fasster) %>% 
+  left_join(fit_tr_naive)
+```
+
+```{r Prophet Forecasting}
+forecast_tr <- forecast(fit_tr, data_rat_spots_15min)
+
+```
+
+```{r Model Evaluation}
+accuracy(forecast_tr, data_rat_spots_15min)
+
+```
+
+
+# Actual Model
+```{r Fit Prophet whole base}
+library(future)
+plan(multisession)
+options(future.rng.onMisue = "ignore")
+
+fit_prophet <- data_rat_spots_15min %>% 
+  model(
+    prophet = prophet(log(mean_15min + 1)  ~ season("day", 4, type = "additive") +  season("week", 4, type = "additive") + holiday(holidays = hld)))
+```
+
+```{r Forecast whole base}
+forecast_prophet <- forecast(fit_prophet, h = "6 weeks")
+
+```
+
+
+```{r Preparing Forecast Dataframe}
+data_forecast <- forecast_prophet %>%
+  tibble() %>% 
+  ungroup() %>% 
+  mutate(abs = pmax(round(.mean, 3), 0)) %>%
+  select(country, ibms_feed_id, bts_demo_id, .model, datetime = time_window_15min, abs) %>% 
+  pivot_wider(names_from = .model, values_from = abs) %>% 
+  left_join(demos %>% select(country, bts_demo_id, cru_file_universe_000), by = c("country", "bts_demo_id")) %>% 
+  mutate(date = format(date(datetime), "%Y/%m/%d"), 
+         Time = format.Date(datetime, "%H:%M:%S"),
+         AudiencePercent = round(100*prophet/cru_file_universe_000,3)) %>% 
+  select(target = bts_demo_id, channel = ibms_feed_id, date, Time, AudiencePercent)
+
+rm(forecast_prophet)
+
+```
+
+
+```{r Exporting XML}
+data_forecast_bkup <- data_forecast
+data_forecast <- data_forecast %>% 
+  filter(channel == "DCBR")
+
+for(chn in unique(data_forecast$channel)){
+  xml = xmlTree("Channel", attrs = c(name = chn))
+  for(dt in data_forecast %>% filter(channel == chn) %>% distinct(date) %>% pull){
+          xml$addNode("Date", attrs = c(value = dt), close = FALSE)
+            xml$addTag("Targets", close = FALSE)
+            for(tgt in data_forecast %>% filter(channel == chn, date == dt) %>% distinct(target) %>% pull){xml$addNode("Target", attrs = c(Code = tgt), close = FALSE)
+              dp <- data_forecast %>% filter(channel == chn, date == dt, target == tgt) %>% select(Time, AudiencePercent)
+              sapply(1:dim(dp)[1], function(i){xml$addNode("Daypart", attrs = c(Time = dp$Time[i], AudiencePercent = dp$AudiencePercent[i]))})
+              xml$closeNode()}
+            xml$closeTag()
+          xml$closeNode()
+      }
+  #assign(paste(chn), xml)
+  cat(saveXML(xml, prefix = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'), 
+          file=file.path("../XML_Export",paste0(str_replace_all(chn, " ", "_"), ".xml")))
+  rm(xml)
+  }
+
+```
+
+

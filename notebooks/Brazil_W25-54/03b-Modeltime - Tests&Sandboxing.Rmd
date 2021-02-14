@@ -1,0 +1,97 @@
+---
+title: "Ratings Forecasting - Models Modeltime"
+date: "`r Sys.Date()`"
+---
+
+# Loading Packages and Data Load
+```{r setup, echo=FALSE, cache=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+source(here::here("/notebooks/Brazil_W25-54/00-Setup.R"))
+load(here::here("/data/data.Rdata"))
+```
+
+# Old Test of TBATS on Forecast model
+```{r eval=FALSE, include=FALSE}
+data_tsobj <- data_ts %>%
+  filter(Channel == "Discovery Channel") %>%
+  select(-Target) %>%
+  as.ts(ABS, frequency = 4 * 24)
+
+fit_tbats <- data_tsobj %>%
+  window(end = c(2020, 1)) %>%
+  forecast::tbats(use.box.cox = TRUE, seasonal.periods = c(4 * 24, 7 * 4 * 24))
+
+test_window <- window(data_tsobj, start = c(2020, 1))
+```
+
+# ModelTime / TimeTK
+
+```{r}
+library(tidymodels)
+library(modeltime)
+library(tidyverse)
+library(lubridate)
+library(timetk)
+data_tdmdl_splits <- data %>%
+  filter(Channel == "Discovery Channel", DateTime >= ymd("2018-06-01")) %>%
+  initial_time_split(prop = 0.9)
+```
+
+```{r}
+future::plan("multiprocess")
+
+fit_arima_boosted <- arima_boost(
+  min_n = 2,
+  learn_rate = 0.015
+) %>%
+  set_engine(engine = "auto_arima_xgboost") %>%
+  fit(ABS ~ DateTime + hour + holiday + wday,
+    data = training(data_tdmdl_splits)
+  )
+
+fit_tbats <- seasonal_reg() %>%
+  set_engine(engine = "tbats") %>%
+  fit(ABS, period_1 = 96, period_2 = 672,
+    data = training(data_tdmdl_splits)
+  )
+
+fit_ets <- exp_smoothing() %>%
+  set_engine(engine = "ets") %>%
+  fit(ABS ~ DateTime, data = training(data_tdmdl_splits))
+
+fit_prophet <- prophet_reg() %>%
+  set_engine(engine = "prophet") %>%
+  fit(ABS ~ DateTime, data = training(data_tdmdl_splits))
+
+models_tbl <- modeltime_table(
+  fit_arima_boosted,
+  fit_ets,
+  fit_prophet
+)
+
+calibration_tbl <- models_tbl %>%
+  modeltime_calibrate(new_data = testing(data_tdmdl_splits))
+
+discovery <- data %>% 
+  filter(Channel == "Discovery Channel", DateTime >= ymd("2018-06-01"))
+
+future::plan("default")
+
+b <- calibration_tbl %>%
+  modeltime_forecast(
+    new_data = testing(data_tdmdl_splits),
+    actual_data = discovery
+  ) 
+
+b %>%
+  plot_modeltime_forecast(
+    .legend_max_width = 25, # For mobile screens
+    .interactive = interactive
+  )
+
+
+calibration_tbl %>%
+    modeltime_accuracy() %>%
+    table_modeltime_accuracy(resizable = TRUE, bordered = TRUE)
+
+```

@@ -1,0 +1,172 @@
+---
+title: "Ratings Forecasting - Get Data"
+date: "`r Sys.Date()`"
+---
+
+# Loading Packages and Data Load
+## Setup Custom Functions
+```{r setup, echo=FALSE, cache=FALSE}
+source(here::here("/notebooks/Brazil_W25-54/00-Setup.R"))
+```
+
+## Load TXT Files to the envoriment and tidy data
+```{r Load TXT Files}
+# Load TXT Files to the envoriment ----
+raw_path <- "./data_raw/15minBrazil/"
+filenames <- list.files(
+  path = raw_path,
+  pattern = "*.*",
+  recursive = TRUE
+)
+fullpath <- file.path(raw_path, filenames)
+
+ratings_raw <- lapply(fullpath, data.table::fread,
+  skip = 2, sep = ",", showProgress = FALSE,
+  blank.lines.skip = TRUE, stringsAsFactors = FALSE,
+  col.names = c("Channel", "Date", "Time", "Target", "TRP", "ABS")
+)
+data <- data.table::rbindlist(ratings_raw)
+
+# Adjusting time (Data comes with a 30h day (06:00-29:59)
+convert.to.sec <- function(X) {
+  X <- strsplit(X, ":")
+  sapply(X, function(Y) sum(as.numeric(Y) * c(3600, 60, 1)))
+}
+
+# Tidy Data ----
+data <- data %>%
+  tibble() %>%
+  mutate(
+    DateTime =
+      fast_strptime(Date, "%Y-%m-%d", tz = "UTC", lt = FALSE) +
+        seconds(convert.to.sec(data$Time)),
+    Channel = as.factor(Channel),
+    Target = as.factor(Target)
+  ) %>%
+  select(-Date, -Time)
+
+rm(ratings_raw, filenames, fullpath, raw_path, convert.to.sec)
+```
+
+# Feature Engineering
+## Getting some key aspects
+```{r Setting Parameters}
+DateStart <- min(data$DateTime)
+DateEnd <- max(data$DateTime)
+DateCutoff <- DateStart + hours(
+  round(
+    0.9 *
+      time_length(lubridate::interval(DateStart, DateEnd), "hour"),
+    0
+  )
+)
+ForecastHorizon <- "6 months" # Used on final forecast
+YearStart <- year(DateStart) # Used on Holidays Tsibble / data.frame
+YearEnd <- year(DateEnd + as.duration(ForecastHorizon)) # Used on Holidays Tsibble / data.frame
+```
+
+## Holidays
+I built the holidays dataset because:
+# prophet::generated_holidays doesn't have the ecclesiastical holidays (based on Easter) for Brazil and Proclamation of Republic holiday is on Nov 5th and not on Nov 15. 
+# bizdays:holidaysANBIMA doesn't have the name of the holidays, what prevent the creation of dummies for each holiday (effect of "Carnival Tuesday" might be different than the effect of "Christmas Day").
+# timeDate::holiday doesn't have Brazil. I therefore used timeDate::Easter to se Carnival and Corpus Christi. 
+
+I also use the weekdays to understand bridges of long weekends.
+
+```{r Creating holiday}
+# First on Prophet format
+holidays_brazil_prophet <-
+  tibble(ds = date(as.character()), weekday = integer(), holiday = as.character(), lower_window = integer(), upper_window = integer()) %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, -2)), holiday = "Easter Friday") %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, -48)), holiday = "Carnival Monday", lower_window = 0, upper_window = 0) %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, -47)), holiday = "Carnival Tuesday", lower_window = 0, upper_window = 0) %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, -46)), holiday = "Carnival Wednesday", lower_window = 0, upper_window = 0) %>%
+  add_row(ds = ymd(timeDate::Easter(YearStart:YearEnd, 60)), holiday = "CorpusChristi") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-01-01")), ymd(paste0(YearEnd, "-01-01")), by = "years"), holiday = "New Year's Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-01-25")), ymd(paste0(YearEnd, "-01-25")), by = "years"), holiday = "Sao Paulo Anniversary") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-04-21")), ymd(paste0(YearEnd, "-04-21")), by = "years"), holiday = "Tiradentes") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-05-01")), ymd(paste0(YearEnd, "-05-01")), by = "years"), holiday = "Workers' Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-09-07")), ymd(paste0(YearEnd, "-09-07")), by = "years"), holiday = "Independece Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-10-12")), ymd(paste0(YearEnd, "-10-12")), by = "years"), holiday = "Our Lady of Apparition") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-11-02")), ymd(paste0(YearEnd, "-11-02")), by = "years"), holiday = "All Souls' Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-11-15")), ymd(paste0(YearEnd, "-11-15")), by = "years"), holiday = "Republic Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-11-20")), ymd(paste0(YearEnd, "-11-20")), by = "years"), holiday = "Black Awareness Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-12-24")), ymd(paste0(YearEnd, "-12-24")), by = "years"), holiday = "Christmas Eve") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-12-25")), ymd(paste0(YearEnd, "-12-25")), by = "years"), holiday = "Christmas Day") %>%
+  add_row(ds = seq(ymd(paste0(YearStart, "-12-31")), ymd(paste0(YearEnd, "-12-31")), by = "years"), holiday = "New Year's Eve") %>%
+  mutate(
+    weekday = wday(ds),
+    lower_window = ifelse(is.na(lower_window), ifelse(weekday == 3, -1, 0), lower_window),
+    upper_window = ifelse(is.na(upper_window), ifelse(weekday == 5, 1, 0), upper_window)
+  ) %>%
+  arrange(ds)
+```
+
+```{r converting holidays to long format}
+holidays_brazil <- holidays_brazil_prophet %>%
+  dplyr::filter(lower_window != 0 | upper_window != 0) %>%
+  mutate(
+    ds = (ds + days(upper_window) + days(lower_window)),
+    holiday = paste(holiday, " Bridge"),
+    lower_window = 0,
+    upper_window = 0
+  ) %>%
+  bind_rows(holidays_brazil_prophet, .) %>%
+  select(ds, holiday) %>%
+  rename(date = ds) %>%
+  distinct(date, .keep_all = TRUE) %>%
+  arrange(date) %>%
+  mutate(date = as.Date(as.POSIXct(date)))
+```
+
+```{r incorporate holidays to data}
+data <- data %>%
+  mutate(date = date(DateTime)) %>%
+  left_join(holidays_brazil, by = c("date" = "date")) %>%
+  mutate(holidayflag = ifelse(is.na(holiday), 0, 1)) %>%
+  select(-date)
+
+holidays_brazil_prophet <- as_tsibble(holidays_brazil_prophet, index = ds)
+```
+
+## Other Features
+Besides holidays, I'm activelly adding more variables to the model so we can have more elements to fit a Linear Model (GLM) or Neural Network.
+```{r}
+data <- data %>%
+  tk_augment_timeseries_signature(.date_var = DateTime) %>%
+  mutate(daytype = ifelse(wday == 1 | wday == 7, 0, 1)) %>%
+  mutate(time = hms::hms(as.numeric(DateTime - floor_date(DateTime, "1 day"), unit = "secs")))
+```
+
+## Tsibble & Break Train & Test
+```{r}
+data_ts <- as_tsibble(data, index = DateTime, key = c("Channel", "Target"))
+data_ts_train <- data_ts %>%
+  filter_index(. ~ paste(DateCutoff))
+data_ts_test <- data_ts %>%
+  filter_index(paste(DateCutoff) ~ .)
+```
+
+## Future Data
+```{r}
+ChannelsTargets <- data %>%
+  select(Target, Channel) %>%
+  distinct(Target, Channel)
+
+data_ts_future <-
+  data.frame(DateTime = seq(from = DateEnd + as.duration("15 minutes"), to = DateEnd + as.period(ForecastHorizon), by = as.duration("15 minutes"))) %>%
+  mutate(daytype = ifelse(wday(DateTime) == 1 | wday(DateTime) == 7, 0, 1)) %>%
+  mutate(time = hms::hms(as.numeric(DateTime - floor_date(DateTime, "1 day"), unit = "secs"))) %>%
+  mutate(date = date(DateTime)) %>%
+  left_join(holidays_brazil, by = c("date" = "date")) %>%
+  mutate(holidayflag = ifelse(is.na(holiday), 0, 1)) %>%
+  select(-date) %>%
+  tk_augment_timeseries_signature(.date_var = DateTime) %>%
+  merge(ChannelsTargets) %>%
+  as_tsibble(index = DateTime, key = c("Channel", "Target"))
+```
+
+## Save Dataset
+```{r}
+save(list = ls(all.names = TRUE), file=here::here("data/data.Rdata"))
+```
